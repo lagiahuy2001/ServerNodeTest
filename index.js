@@ -1,9 +1,8 @@
-const app = require('express')();
-const port = 3000;
+const express = require("express");
+const app = express();
+const PORT = 3000;
 
-app.listen(port, () => {
-  console.log(`Server is running on http://localhost:${port}`);
-});
+app.use(express.json());
 
 app.get('/', (req, res) => {
   res.send('Hello, World!');
@@ -15,4 +14,9 @@ app.get('/about', (req, res) => {
     message: 'This is the about page.',
     status: 'success'
   });
+});
+
+
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
 });
