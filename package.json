@@ -4,8 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon --inspect=0.0.0.0:9229 server.js"
+    "start": "node index.js",
+    "dev": "nodemon --inspect=0.0.0.0:9229 index.js"
   },
   "keywords": [],
   "author": "",
