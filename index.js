@@ -235,8 +235,6 @@ app.get("/data", async (req, res) => {
       <a href="/data/clear" class="btn btn-danger" onclick="return confirm('Xóa toàn bộ dữ liệu?')">Xóa tất cả</a>
     </div>
 
-    ${pagination}
-
     <table>
       <thead>
         <tr>
