@@ -1,30 +1,24 @@
 #include <SPI.h>
-#include <EthernetLarge.h>   // Dùng bản Large để buffer lớn hơn
+#include <EthernetLarge.h>
 #include <SSLClient.h>
-#include "trust_anchors.h"   // File chứa Trust Anchors (Let's Encrypt)
+#include "trust_anchors.h"
 
-// ==== CẤU HÌNH CHÂN SPI (tuỳ chỉnh theo board) ====
 #define CS_PIN       21
 #define RST_PIN      4
 #define SPI_SCK_PIN  18
 #define SPI_MISO_PIN 19
 #define SPI_MOSI_PIN 23
 
-// ==== THÔNG TIN DỊCH VỤ ====
-const char* HOST = "servernodetest-eiq5.onrender.com";
+const char* HOST       = "servernodetest-eiq5.onrender.com";
 const int   HTTPS_PORT = 443;
-const char* PATH = "/log";
+const char* PATH_LOG   = "/log";
+const char* PATH_WAIT  = "/wait";
 
-// ==== ETHERNET + SSL CLIENT ====
 EthernetClient base_client;
-SSLClient ssl_client(base_client, TAs, TAs_NUM, 0, 2048, (SSLClient::DebugLevel)0);  // SỬA: Chỉ truyền base_client
+SSLClient ssl_client(base_client, TAs, TAs_NUM, 0, 2048, (SSLClient::DebugLevel)0);
 
-// ==== MAC address (tuỳ chọn, thay đổi nếu cần) ====
 byte MAC[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 
-// ======= HÀM PHỤ TRỢ =======
-
-// In trạng thái liên kết Ethernet
 void printLinkStatus() {
   #ifdef ETHERNET_LARGE_H
   EthernetLinkStatus link = Ethernet.linkStatus();
@@ -37,7 +31,6 @@ void printLinkStatus() {
   #endif
 }
 
-// In thông tin mạng
 void printNetworkInfo() {
   IPAddress ip = Ethernet.localIP();
   Serial.print(F("[ETH] IP: "));       Serial.println(ip);
@@ -46,120 +39,127 @@ void printNetworkInfo() {
   Serial.print(F("[ETH] DNS: "));      Serial.println(Ethernet.dnsServerIP());
 }
 
-// Chuyển IPAddress thành String (an toàn, không dùng toString())
 String ipToString(IPAddress ip) {
   return String(ip[0]) + "." + ip[1] + "." + ip[2] + "." + ip[3];
 }
 
-// Đọc 1 dòng từ Stream (an toàn, tránh String lớn)
-String readLine(Stream& client) {
+String readLine(Stream& client, uint32_t timeoutMs = 10000) {
   String line = "";
   char c;
-  uint32_t timeout = millis() + 5000;
+  uint32_t timeout = millis() + timeoutMs;
   while (millis() < timeout) {
     if (client.available()) {
       c = client.read();
-      if (c == '\r') continue;           // Bỏ \r
-      if (c == '\n') break;              // Kết thúc dòng
-      if (line.length() < 256) line += c; // Giới hạn độ dài
+      if (c == '\r') continue;
+      if (c == '\n') break;
+      if (line.length() < 256) line += c;
     }
     yield();
   }
   return line;
 }
 
-// Gửi GET request HTTPS và in phản hồi
-bool httpsGET_LogOnce() {
-  String device    = "ESP32-ETH";
-  String status    = "online";
-  uint32_t timestamp = millis() / 1000;
-  uint32_t uptime    = millis() / 1000;
-  String localip   = ipToString(Ethernet.localIP());
-
-  // Tạo URL an toàn với snprintf (tránh String concatenation)
-  char url[256];
-  snprintf(url, sizeof(url),
-           "%s?device=%s&status=%s&timestamp=%lu&uptime=%lu&localip=%s",
-           PATH, device.c_str(), status.c_str(), timestamp, uptime, localip.c_str());
-
-  Serial.print(F("[TLS] Connecting to ")); Serial.print(HOST); Serial.print(F(":")); Serial.println(HTTPS_PORT);
-
-  if (!ssl_client.connect(HOST, HTTPS_PORT)) {
-    Serial.println(F("[TLS] Connect failed"));
+bool sendLogData() {
+  if (Ethernet.linkStatus() != LinkON) {
+    Serial.println(F("[ETH] Link down → skip send"));
     return false;
   }
-  Serial.println(F("[TLS] Connected. Sending request..."));
 
-  // Gửi HTTP request
-  ssl_client.print(F("GET "));
-  ssl_client.print(url);
+  String device = "ESP32-ETH";
+  String status = "online";
+  uint32_t ts   = millis() / 1000;
+  uint32_t up   = millis() / 1000;
+  String ip     = ipToString(Ethernet.localIP());
+
+  char json[256];
+  snprintf(json, sizeof(json),
+           "{\"device\":\"%s\",\"status\":\"%s\",\"timestamp\":%lu,\"uptime\":%lu,\"localip\":\"%s\"}",
+           device.c_str(), status.c_str(), ts, up, ip.c_str());
+
+  if (!ssl_client.connect(HOST, HTTPS_PORT)) {
+    Serial.println(F("[TLS] Connect failed (log)"));
+    return false;
+  }
+
+  ssl_client.print(F("POST "));
+  ssl_client.print(PATH_LOG);
   ssl_client.println(F(" HTTP/1.1"));
   ssl_client.print(F("Host: ")); ssl_client.println(HOST);
-  ssl_client.println(F("User-Agent: esp32-ethernet/1.0"));
+  ssl_client.println(F("Content-Type: application/json"));
+  ssl_client.print(F("Content-Length: ")); ssl_client.println(strlen(json));
+  ssl_client.println(F("Connection: close"));
+  ssl_client.println();
+  ssl_client.print(json);
+
+  uint32_t t0 = millis();
+  while (ssl_client.connected() && !ssl_client.available() && (millis() - t0 < 8000)) yield();
+
+  String statusLine = readLine(ssl_client, 10000);
+  ssl_client.stop();
+
+  bool ok = statusLine.indexOf("200") != -1;
+  Serial.print(F("[LOG] Send ")); Serial.println(ok ? F("OK") : F("FAIL"));
+  return ok;
+}
+
+bool waitForCommand(uint32_t timeoutMs = 60000) {
+  if (Ethernet.linkStatus() != LinkON) {
+    Serial.println(F("[ETH] Link down → skip wait"));
+    delay(1000);
+    return false;
+  }
+
+  if (!ssl_client.connect(HOST, HTTPS_PORT)) {
+    Serial.println(F("[TLS] Connect failed (wait)"));
+    return false;
+  }
+
+  ssl_client.print(F("GET "));
+  ssl_client.print(PATH_WAIT);
+  ssl_client.println(F(" HTTP/1.1"));
+  ssl_client.print(F("Host: ")); ssl_client.println(HOST);
   ssl_client.println(F("Connection: close"));
   ssl_client.println();
 
-  // Chờ phản hồi
   uint32_t t0 = millis();
-  while (ssl_client.connected() && !ssl_client.available() && (millis() - t0 < 8000)) {
-    yield();
-  }
-  if (!ssl_client.available()) {
-    Serial.println(F("[HTTP] No response (timeout)"));
-    ssl_client.stop();
-    return false;
-  }
-
-  // Đọc status line
-  String statusLine = readLine(ssl_client);
-  statusLine.trim();
-  Serial.print(F("[HTTP] Status: ")); Serial.println(statusLine);
-
-  // Đọc header + body
-  bool isHeader = true;
-  int contentCount = 0;
-  Serial.println(F("[HTTP] --- BODY ---"));
-
-  while (ssl_client.connected() && ssl_client.available()) {
-    String line = readLine(ssl_client);
-    if (isHeader) {
-      if (line.length() == 0) {
-        isHeader = false;
-        continue;
-      }
-      // In một số header quan trọng
-      if (line.startsWith("Content-Type:") || line.startsWith("Content-Length:")) {
-        Serial.println("[HTTP] " + line);
-      }
-    } else {
-      // In body (giới hạn 512 byte)
-      if (contentCount < 512) {
-        Serial.print(line);
-        if (!line.endsWith("\n")) Serial.println();
-        contentCount += line.length() + 1;
-      } else if (contentCount == 512) {
-        Serial.println(F("\n[HTTP] (truncated)"));
-        contentCount++;
-      }
+  while (ssl_client.connected() && !ssl_client.available()) {
+    if (millis() - t0 > timeoutMs) {
+      Serial.println(F("[WAIT] Timeout"));
+      ssl_client.stop();
+      return false;
     }
     yield();
   }
 
+  String statusLine = readLine(ssl_client, 15000);
+  if (!statusLine.startsWith("HTTP/1.1 200")) {
+    Serial.print(F("[WAIT] Bad status: ")); Serial.println(statusLine);
+    ssl_client.stop();
+    return false;
+  }
+
+  while (ssl_client.connected()) {
+    String h = readLine(ssl_client);
+    if (h.length() == 0) break;
+  }
+
+  String body;
+  while (ssl_client.connected() && ssl_client.available()) {
+    body += (char)ssl_client.read();
+  }
   ssl_client.stop();
-  Serial.println(F("\n[TLS] Connection closed"));
-  return true;
+
+  Serial.print(F("[WAIT] Response: ")); Serial.println(body);
+  return (body.indexOf("\"cmd\":\"send\"") != -1);
 }
 
-// ======= SETUP =======
 void setup() {
   Serial.begin(115200);
   while (!Serial); delay(500);
-  Serial.println(F("\n=== ESP32 Ethernet -> Render.com /log test ==="));
+  Serial.println(F("\n=== ESP32 Ethernet Long-poll IoT ==="));
 
-  // Khởi tạo SPI thủ công
   SPI.begin(SPI_SCK_PIN, SPI_MISO_PIN, SPI_MOSI_PIN);
 
-  // Reset W5500
   if (RST_PIN != -1) {
     pinMode(RST_PIN, OUTPUT);
     digitalWrite(RST_PIN, LOW);
@@ -168,7 +168,6 @@ void setup() {
     delay(200);
   }
 
-  // Khởi động Ethernet
   Ethernet.init(CS_PIN);
   Serial.println(F("[ETH] Starting DHCP..."));
 
@@ -186,22 +185,27 @@ void setup() {
   printLinkStatus();
   printNetworkInfo();
 
-  // SỬA: Thiết lập Trust Anchor cho SSLClient
-  Serial.println(F("[SSL] Setting up trust anchors..."));
-
-  // Test 1 lần
+  Serial.println(F("[SSL] Ready with Let's Encrypt TAs"));
   delay(2000);
-  bool ok = httpsGET_LogOnce();
-  Serial.print(F("[RESULT] /log call: "));
-  Serial.println(ok ? F("SUCCESS") : F("FAILED"));
 }
 
 void loop() {
-  // Gửi mỗi 30 giây (tuỳ chỉnh)
-  static uint32_t lastSend = 0;
-  if (millis() - lastSend >= 30000) {
-    lastSend = millis();
-    httpsGET_LogOnce();
+  static uint32_t lastLinkCheck = 0;
+  if (millis() - lastLinkCheck > 10000) {
+    lastLinkCheck = millis();
+    if (Ethernet.linkStatus() == LinkOFF) {
+      Serial.println(F("[ETH] Link lost → restart Ethernet"));
+      Ethernet.begin(MAC);
+    }
   }
+
+  Serial.println(F("\n[WAIT] Waiting for server command..."));
+  if (waitForCommand()) {
+    Serial.println(F("[CMD] Server requested data → sending"));
+    sendLogData();
+  } else {
+    Serial.println(F("[CMD] No command (timeout/none)"));
+  }
+
   delay(100);
 }

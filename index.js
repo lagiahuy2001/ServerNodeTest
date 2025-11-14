@@ -61,7 +61,7 @@ app.get("/", (req, res) => {
  * Params: device, status, timestamp, uptime, localip
  * Ví dụ: /log?device=esp32-01&status=online&timestamp=1730640000&uptime=3600&localip=192.168.1.10
  */
-app.get("/log", (req, res) => {
+app.post("/log", (req, res) => {
   const { device, status, timestamp, uptime, localip } = req.query;
 
   // Kiểm tra tối thiểu
@@ -168,6 +168,30 @@ app.get("/data/clear", (req, res) => {
     res.redirect("/data");
   } catch (err) {
     res.status(500).json({ ok: false, message: "Xóa dữ liệu thất bại" });
+  }
+});
+
+let pendingRequest = null;          // lưu request đang chờ
+
+app.get('/wait', (req, res) => {
+  pendingRequest = res;             // giữ kết nối
+  req.on('close', () => pendingRequest = null);
+  // timeout 60s để tránh treo vĩnh viễn
+  setTimeout(() => {
+    if (pendingRequest === res) {
+      res.json({cmd: 'none'});
+      pendingRequest = null;
+    }
+  }, 60000);
+});
+
+app.post('/trigger', (req, res) => {
+  if (pendingRequest) {
+    pendingRequest.json({cmd: 'send'});
+    pendingRequest = null;
+    res.send('triggered');
+  } else {
+    res.send('no client waiting');
   }
 });
 
