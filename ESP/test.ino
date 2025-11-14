@@ -6,7 +6,7 @@
 #include <WiFiUdp.h>
 #include <SPIFFS.h>
 
-// ====================== CẤU HÌNH CHUNG ======================
+// ====================== CẤU HÌNH ======================
 #define CS_PIN       21
 #define RST_PIN      4
 #define SPI_SCK_PIN  18
@@ -14,18 +14,15 @@
 #define SPI_MOSI_PIN 23
 
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
-
-// ==== THIẾT BỊ RIÊNG (THAY ĐỔI KHI UPLOAD CHO TỪNG ESP) ====
 const String DEVICE_KEY = "ESP_UNIT_001";  // ← THAY ĐỔI CHO TỪNG ESP
 
-// ==== SERVER CONFIG ====
 const char* API_HOST = "servernodetest-eiq5.onrender.com";
 const int   API_PORT = 443;
 const char* PATH_LOG   = "/log";
 const char* PATH_WAIT  = "/wait";
 const char* PATH_STATUS = "/status";
 
-// ==== CHÂN TÍN HIỆU ====
+// Chân
 #define PIN_MODE_MAY_PHAT 16
 #define PIN_MODE_CAN_CAU  17
 #define PIN_DATA_1        26
@@ -36,19 +33,18 @@ const String ID_MAY_PHAT_2 = "MAY_PHAT_2";
 const String ID_CAN_CAU_1  = "CAN_CAU_1";
 const String ID_CAN_CAU_2  = "CAN_CAU_2";
 
-// ==== BIẾN TRẠNG THÁI ====
-bool isData1On = false, lastData1State = false;
-bool isData2On = false, lastData2State = false;
+// Trạng thái
+bool lastData1State = false, lastData2State = false;
 unsigned long data1StartTime = 0, data2StartTime = 0;
 
-// ==== BUFFER ====
+// Buffer
 #define BUFFER_FILE "/buffer.txt"
 
-// ==== NTP ====
+// NTP
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600, 60000);  // GMT+7
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600, 60000);
 
-// ==== SSL CLIENT ====
+// SSL
 EthernetClient base_client;
 SSLClient api_client(base_client, TAs, TAs_NUM, 0, 2048, (SSLClient::DebugLevel)0);
 
@@ -83,7 +79,7 @@ String readLine(Stream& client, uint32_t timeoutMs = 10000) {
   return line;
 }
 
-// ====================== GỬI DỮ LIỆU (LƯU VÀO FILE) ======================
+// ====================== GỬI DỮ LIỆU ======================
 bool sendDataToApi(String timestamp, String status, String uptime, bool isResent, String deviceId) {
   char json[512];
   snprintf(json, sizeof(json),
@@ -92,15 +88,9 @@ bool sendDataToApi(String timestamp, String status, String uptime, bool isResent
     uptime.c_str(), ipToString(Ethernet.localIP()).c_str(), isResent ? "true" : "false");
 
   if (Ethernet.linkStatus() != LinkON) return false;
+  if (!api_client.connect(API_HOST, API_PORT)) return false;
 
-  if (!api_client.connect(API_HOST, API_PORT)) {
-    Serial.println(F("[TLS] Connect failed (log)"));
-    return false;
-  }
-
-  api_client.print(F("POST "));
-  api_client.print(PATH_LOG);
-  api_client.println(F(" HTTP/1.1"));
+  api_client.print(F("POST ")); api_client.print(PATH_LOG); api_client.println(F(" HTTP/1.1"));
   api_client.print(F("Host: ")); api_client.println(API_HOST);
   api_client.println(F("Content-Type: application/json"));
   api_client.print(F("Content-Length: ")); api_client.println(strlen(json));
@@ -110,13 +100,9 @@ bool sendDataToApi(String timestamp, String status, String uptime, bool isResent
 
   String statusLine = readLine(api_client, 10000);
   api_client.stop();
-
-  bool ok = statusLine.indexOf("200") != -1;
-  Serial.print(F("[LOG] Send ")); Serial.println(ok ? F("OK") : F("FAIL"));
-  return ok;
+  return statusLine.indexOf("200") != -1;
 }
 
-// ====================== GỬI TRẠNG THÁI THEO YÊU CẦU (CHỈ POPUP) ======================
 bool sendStatusToServer(String timestamp, String status, String uptime, String deviceId) {
   char json[512];
   snprintf(json, sizeof(json),
@@ -125,15 +111,9 @@ bool sendStatusToServer(String timestamp, String status, String uptime, String d
     uptime.c_str(), ipToString(Ethernet.localIP()).c_str());
 
   if (Ethernet.linkStatus() != LinkON) return false;
+  if (!api_client.connect(API_HOST, API_PORT)) return false;
 
-  if (!api_client.connect(API_HOST, API_PORT)) {
-    Serial.println(F("[TLS] Connect failed (status)"));
-    return false;
-  }
-
-  api_client.print(F("POST "));
-  api_client.print(PATH_STATUS);
-  api_client.println(F(" HTTP/1.1"));
+  api_client.print(F("POST ")); api_client.print(PATH_STATUS); api_client.println(F(" HTTP/1.1"));
   api_client.print(F("Host: ")); api_client.println(API_HOST);
   api_client.println(F("Content-Type: application/json"));
   api_client.print(F("Content-Length: ")); api_client.println(strlen(json));
@@ -143,52 +123,31 @@ bool sendStatusToServer(String timestamp, String status, String uptime, String d
 
   String statusLine = readLine(api_client, 10000);
   api_client.stop();
-
-  bool ok = statusLine.indexOf("200") != -1;
-  Serial.print(F("[STATUS] Send ")); Serial.println(ok ? F("OK") : F("FAIL"));
-  return ok;
+  return statusLine.indexOf("200") != -1;
 }
 
-// ====================== LONG-POLL LẮNG NGHE ======================
+// ====================== LONG-POLL (RIÊNG BIỆT) ======================
 bool waitForCommand(uint32_t timeoutMs = 60000) {
-  if (Ethernet.linkStatus() != LinkON) {
-    Serial.println(F("[ETH] Link down → skip wait"));
-    delay(1000);
-    return false;
-  }
+  if (Ethernet.linkStatus() != LinkON) return false;
+  if (!api_client.connect(API_HOST, API_PORT)) return false;
 
-  if (!api_client.connect(API_HOST, API_PORT)) {
-    Serial.println(F("[TLS] Connect failed (wait)"));
-    return false;
-  }
-
-  api_client.print(F("GET "));
-  api_client.print(PATH_WAIT);
-  api_client.print(F("?device_key="));
-  api_client.print(DEVICE_KEY);
-  api_client.println(F(" HTTP/1.1"));
+  api_client.print(F("GET ")); api_client.print(PATH_WAIT); api_client.print(F("?device_key="));
+  api_client.print(DEVICE_KEY); api_client.println(F(" HTTP/1.1"));
   api_client.print(F("Host: ")); api_client.println(API_HOST);
   api_client.println(F("Connection: close"));
   api_client.println();
 
   uint32_t t0 = millis();
   while (api_client.connected() && !api_client.available()) {
-    if (millis() - t0 > timeoutMs) {
-      Serial.println(F("[WAIT] Timeout"));
-      api_client.stop();
-      return false;
-    }
+    if (millis() - t0 > timeoutMs) break;
     yield();
   }
 
   String statusLine = readLine(api_client, 15000);
   if (!statusLine.startsWith("HTTP/1.1 200")) {
-    Serial.print(F("[WAIT] Bad status: ")); Serial.println(statusLine);
-    api_client.stop();
-    return false;
+    api_client.stop(); return false;
   }
 
-  // Bỏ qua header
   while (api_client.connected()) {
     String h = readLine(api_client);
     if (h.length() == 0) break;
@@ -200,52 +159,20 @@ bool waitForCommand(uint32_t timeoutMs = 60000) {
   }
   api_client.stop();
 
-  Serial.print(F("[WAIT] Response: ")); Serial.println(body);
-
-  // Nếu server ra lệnh send → gửi trạng thái hiện tại (không lưu)
-  if (body.indexOf("\"cmd\":\"send\"") != -1) {
-    unsigned long now = timeClient.getEpochTime();
-    String ts = getFormattedDateTime(now);
-
-    // Xác định trạng thái hiện tại
-    bool modeMayPhat = (digitalRead(PIN_MODE_MAY_PHAT) == LOW);
-    bool modeCanCau  = (digitalRead(PIN_MODE_CAN_CAU) == LOW);
-    String contextId = "";
-
-    if (modeMayPhat) {
-      contextId = (digitalRead(PIN_DATA_1) == LOW) ? ID_MAY_PHAT_1 : ID_MAY_PHAT_2;
-    } else if (modeCanCau) {
-      contextId = (digitalRead(PIN_DATA_1) == LOW) ? ID_CAN_CAU_1 : ID_CAN_CAU_2;
-    } else {
-      contextId = "UNKNOWN";
-    }
-
-    String status = (digitalRead(PIN_DATA_1) == LOW || digitalRead(PIN_DATA_2) == LOW) ? "Bật" : "Tắt";
-    String uptime = "0g0p";  // Có thể tính nếu cần
-
-    sendStatusToServer(ts, status, uptime, contextId);
-    return true;
-  }
-
-  return false;
+  return body.indexOf("\"cmd\":\"send\"") != -1;
 }
 
 // ====================== BUFFER ======================
 void saveDataToBuffer(String timestamp, String status, String uptime, String deviceId) {
   File file = SPIFFS.open(BUFFER_FILE, FILE_APPEND);
-  if (!file) {
-    Serial.println(F("Failed to open buffer file"));
-    return;
+  if (file) {
+    file.printf("%s;%s;%s;%s\n", timestamp.c_str(), status.c_str(), uptime.c_str(), deviceId.c_str());
+    file.close();
   }
-  String line = timestamp + ";" + status + ";" + uptime + ";" + deviceId + "\n";
-  file.print(line);
-  file.close();
-  Serial.println(F("Saved to buffer: ") + line);
 }
 
 void sendBufferedData() {
   if (!SPIFFS.exists(BUFFER_FILE)) return;
-
   File file = SPIFFS.open(BUFFER_FILE, FILE_READ);
   if (!file) return;
 
@@ -279,100 +206,102 @@ void sendBufferedData() {
   file.close(); temp.close();
 
   SPIFFS.remove(BUFFER_FILE);
-  if (!allSent) {
-    SPIFFS.rename("/temp.txt", BUFFER_FILE);
-  } else {
-    SPIFFS.remove("/temp.txt");
-  }
+  if (!allSent) SPIFFS.rename("/temp.txt", BUFFER_FILE);
+  else SPIFFS.remove("/temp.txt");
 }
 
 // ====================== XỬ LÝ TRẠNG THÁI (TỰ ĐỘNG) ======================
 void handleStateChange(bool isNowOn, unsigned long &startTime, const String& deviceId) {
-  unsigned long currentTime = timeClient.getEpochTime();
-  String timestamp = getFormattedDateTime(currentTime);
+  unsigned long now = timeClient.getEpochTime();
+  String timestamp = getFormattedDateTime(now);
   String status = isNowOn ? "Bật" : "Tắt";
   String uptime = "0g0p";
 
-  if (isNowOn) {
-    startTime = currentTime;
-  } else if (startTime > 0) {
-    unsigned long secs = currentTime - startTime;
+  if (!isNowOn && startTime > 0) {
+    unsigned long secs = now - startTime;
     uptime = String(secs / 3600) + "g" + String((secs % 3600) / 60) + "p";
   }
+  if (isNowOn) startTime = now;
 
   Serial.println("[" + deviceId + "] " + status + " @ " + timestamp + " | Uptime: " + uptime);
 
-  // Chờ lệnh từ server
-  if (waitForCommand()) {
-    Serial.println(F("[CMD] Server requested → sent via /status"));
+  // GỬI NGAY, KHÔNG CHỜ
+  if (sendDataToApi(timestamp, status, uptime, false, deviceId)) {
     return;
   }
 
-  // Lưu buffer nếu không gửi được
+  // Nếu thất bại → lưu buffer
   saveDataToBuffer(timestamp, status, uptime, deviceId);
+}
+
+// ====================== ETHERNET RECONNECT ======================
+bool ensureEthernet() {
+  if (Ethernet.linkStatus() == LinkON) return true;
+
+  Serial.println(F("[ETH] Reconnecting..."));
+  Ethernet.begin(mac);
+  delay(1000);
+  if (Ethernet.linkStatus() == LinkON) {
+    Serial.print(F("IP: ")); Serial.println(Ethernet.localIP());
+    return true;
+  }
+  return false;
+}
+
+// ====================== LONG-POLL TASK ======================
+TaskHandle_t longPollTask;
+void longPollLoop(void *pvParameters) {
+  for (;;) {
+    if (ensureEthernet() && waitForCommand()) {
+      // Lệnh từ server → gửi trạng thái hiện tại
+      unsigned long now = timeClient.getEpochTime();
+      String ts = getFormattedDateTime(now);
+
+      bool modeMayPhat = (digitalRead(PIN_MODE_MAY_PHAT) == LOW);
+      bool modeCanCau  = (digitalRead(PIN_MODE_CAN_CAU) == LOW);
+      String contextId = "UNKNOWN";
+
+      if (modeMayPhat) {
+        contextId = (digitalRead(PIN_DATA_1) == LOW) ? ID_MAY_PHAT_1 : ID_MAY_PHAT_2;
+      } else if (modeCanCau) {
+        contextId = (digitalRead(PIN_DATA_1) == LOW) ? ID_CAN_CAU_1 : ID_CAN_CAU_2;
+      }
+
+      String status = (digitalRead(PIN_DATA_1) == LOW || digitalRead(PIN_DATA_2) == LOW) ? "Bật" : "Tắt";
+      sendStatusToServer(ts, status, "0g0p", contextId);
+    }
+    delay(1000);  // Giữ kết nối ổn định
+  }
 }
 
 // ====================== SETUP ======================
 void setup() {
-  Serial.begin(115200);
-  while (!Serial); delay(500);
+  Serial.begin(115200); while (!Serial); delay(500);
   Serial.println(F("\n=== ESP32 IoT Unit ==="));
   Serial.println("DEVICE_KEY: " + DEVICE_KEY);
 
-  // Khởi tạo chân
   pinMode(PIN_MODE_MAY_PHAT, INPUT_PULLUP);
   pinMode(PIN_MODE_CAN_CAU, INPUT_PULLUP);
   pinMode(PIN_DATA_1, INPUT_PULLUP);
   pinMode(PIN_DATA_2, INPUT_PULLUP);
 
-  // SPIFFS
-  if (!SPIFFS.begin(true)) {
-    Serial.println(F("SPIFFS Mount Failed"));
-    return;
-  }
+  if (!SPIFFS.begin(true)) { Serial.println(F("SPIFFS Failed")); return; }
 
-  // Ethernet
   SPI.begin(SPI_SCK_PIN, SPI_MISO_PIN, SPI_MOSI_PIN);
-  if (RST_PIN != -1) {
-    pinMode(RST_PIN, OUTPUT);
-    digitalWrite(RST_PIN, LOW); delay(50);
-    digitalWrite(RST_PIN, HIGH); delay(200);
-  }
+  if (RST_PIN != -1) { pinMode(RST_PIN, OUTPUT); digitalWrite(RST_PIN, LOW); delay(50); digitalWrite(RST_PIN, HIGH); delay(200); }
   Ethernet.init(CS_PIN);
 
-  Serial.println(F("[ETH] Starting..."));
-  if (Ethernet.begin(mac) == 0) {
-    Serial.println(F("DHCP failed → static IP"));
-    IPAddress ip(192, 168, 1, 177);
-    IPAddress dns(8, 8, 8, 8);
-    IPAddress gw(192, 168, 1, 1);
-    IPAddress sn(255, 255, 255, 0);
-    Ethernet.begin(mac, ip, dns, gw, sn);
-  }
-  Serial.print(F("IP: ")); Serial.println(Ethernet.localIP());
-
-  // NTP
+  ensureEthernet();
   timeClient.begin();
-  while (!timeClient.update()) {
-    timeClient.forceUpdate();
-    delay(500);
-  }
-  Serial.println(F("NTP OK"));
+  while (!timeClient.update()) { timeClient.forceUpdate(); delay(500); }
 
-  // SSL
-  SSLClient::SSLConfig cfg;
-  cfg.sni_hostname = API_HOST;
-  api_client.setSSLConfig(cfg);
-  api_client.setTimeout(10000);
+  SSLClient::SSLConfig cfg; cfg.sni_hostname = API_HOST;
+  api_client.setSSLConfig(cfg); api_client.setTimeout(10000);
 
-  // Khởi tạo trạng thái ban đầu
   lastData1State = (digitalRead(PIN_DATA_1) == LOW);
   lastData2State = (digitalRead(PIN_DATA_2) == LOW);
-  unsigned long now = timeClient.getEpochTime();
-  if (digitalRead(PIN_MODE_MAY_PHAT) == LOW && lastData1State) data1StartTime = now;
-  if (digitalRead(PIN_MODE_MAY_PHAT) == LOW && lastData2State) data2StartTime = now;
-  if (digitalRead(PIN_MODE_CAN_CAU) == LOW && lastData1State) data1StartTime = now;
-  if (digitalRead(PIN_MODE_CAN_CAU) == LOW && lastData2State) data2StartTime = now;
+
+  xTaskCreatePinnedToCore(longPollLoop, "LongPoll", 8192, NULL, 1, &longPollTask, 1);
 }
 
 // ====================== LOOP ======================
@@ -380,26 +309,20 @@ void loop() {
   static uint32_t lastBufferCheck = 0;
   timeClient.update();
 
-  // Gửi buffer mỗi 10s
   if (millis() - lastBufferCheck > 10000) {
     lastBufferCheck = millis();
-    if (Ethernet.linkStatus() == LinkON) {
-      sendBufferedData();
-    }
+    if (Ethernet.linkStatus() == LinkON) sendBufferedData();
   }
 
-  // Đọc tín hiệu
+  ensureEthernet();
+
   bool modeMayPhat = (digitalRead(PIN_MODE_MAY_PHAT) == LOW);
   bool modeCanCau  = (digitalRead(PIN_MODE_CAN_CAU) == LOW);
-  isData1On = (digitalRead(PIN_DATA_1) == LOW);
-  isData2On = (digitalRead(PIN_DATA_2) == LOW);
+  bool isData1On = (digitalRead(PIN_DATA_1) == LOW);
+  bool isData2On = (digitalRead(PIN_DATA_2) == LOW);
 
-  String id1 = "", id2 = "";
-  if (modeMayPhat) {
-    id1 = ID_MAY_PHAT_1; id2 = ID_MAY_PHAT_2;
-  } else if (modeCanCau) {
-    id1 = ID_CAN_CAU_1;  id2 = ID_CAN_CAU_2;
-  }
+  String id1 = modeMayPhat ? ID_MAY_PHAT_1 : (modeCanCau ? ID_CAN_CAU_1 : "");
+  String id2 = modeMayPhat ? ID_MAY_PHAT_2 : (modeCanCau ? ID_CAN_CAU_2 : "");
 
   if (isData1On != lastData1State && id1 != "") {
     handleStateChange(isData1On, data1StartTime, id1);

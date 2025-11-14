@@ -7,11 +7,20 @@
     "start": "node index.js",
     "dev": "nodemon --inspect=0.0.0.0:9229 index.js"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "iot",
+    "esp32",
+    "ethernet",
+    "long-poll",
+    "trigger",
+    "realtime",
+    "json"
+  ],
+  "author": "LGH",
   "license": "ISC",
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "async-mutex": "^0.5.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
