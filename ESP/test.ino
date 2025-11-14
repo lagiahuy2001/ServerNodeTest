@@ -17,7 +17,7 @@ const char* PATH = "/log";
 
 // ==== ETHERNET + SSL CLIENT ====
 EthernetClient base_client;
-SSLClient ssl_client(base_client, TAs, TAs_NUM);
+SSLClient ssl_client(base_client, TAs, TAs_NUM, 0, 2048, (SSLClient::DebugLevel)0);  // SỬA: Chỉ truyền base_client
 
 // ==== MAC address (tuỳ chọn, thay đổi nếu cần) ====
 byte MAC[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
@@ -186,6 +186,9 @@ void setup() {
   printLinkStatus();
   printNetworkInfo();
 
+  // SỬA: Thiết lập Trust Anchor cho SSLClient
+  Serial.println(F("[SSL] Setting up trust anchors..."));
+
   // Test 1 lần
   delay(2000);
   bool ok = httpsGET_LogOnce();
@@ -194,5 +197,11 @@ void setup() {
 }
 
 void loop() {
-  // Không làm gì trong loop
+  // Gửi mỗi 30 giây (tuỳ chỉnh)
+  static uint32_t lastSend = 0;
+  if (millis() - lastSend >= 30000) {
+    lastSend = millis();
+    httpsGET_LogOnce();
+  }
+  delay(100);
 }
