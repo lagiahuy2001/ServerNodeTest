@@ -180,15 +180,12 @@ app.get("/data", async (req, res) => {
     body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; background: #f0f2f5; color: #333; }
     .container { max-width: 1200px; margin: auto; background: white; border-radius: 16px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
     h1 { margin: 0 0 20px; color: var(--dark); font-size: 1.8rem; }
-    .actions { margin-bottom: 20px; display: flex; gap: 12px; flex-wrap: wrap; }
-    .btn {
-      padding: 10px 18px; border: none; border-radius: 8px; font-weight: 500; cursor: pointer;
-      text-decoration: none; display: inline-block; transition: all 0.2s; font-size: 0.95rem;
-    }
-    .btn-primary { background: var(--primary); color: white; }
-    .btn-danger { background: var(--danger); color: white; }
-    .btn:hover { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 4px 8px rgba(0,0,0,0.15); }
-    .btn.disabled { background: #ccc; cursor: not-allowed; opacity: 0.6; pointer-events: none; }
+    .actions{display:flex;justify-content:space-between;align-items:center;width:100%;margin-bottom:20px}
+    .btn{padding:10px 18px;border:none;border-radius:8px;font-weight:500;cursor:pointer;text-decoration:none;display:inline-block;transition:.2s;font-size:.95rem;white-space:nowrap}
+    .btn-primary{background:var(--primary);color:#fff}
+    .btn-danger{background:var(--danger);color:#fff}
+    .btn:hover{opacity:.9;transform:translateY(-1px);box-shadow:0 4px 8px rgba(0,0,0,.15)}
+    .btn.disabled{background:#ccc;cursor:not-allowed;opacity:.6;pointer-events:none}
 
     table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.95rem; }
     th, td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
@@ -205,7 +202,7 @@ app.get("/data", async (req, res) => {
     .close { cursor: pointer; font-size: 1.8rem; color: #aaa; font-weight: bold; }
     .close:hover { color: #000; }
     label { display: block; margin: 12px 0 6px; font-weight: 500; color: var(--dark); }
-    select, button { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ddd; border-radius: 8px; font-size: 1rem; }
+    .modal select, .modal button { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ddd; border-radius: 8px; font-size: 1rem; }
     select { background: white; }
     button { background: var(--primary); color: white; font-weight: 500; cursor: pointer; }
     button:hover { background: #0056b3; }
@@ -232,7 +229,9 @@ app.get("/data", async (req, res) => {
     <h1>IoT Monitor - Dữ liệu từ ESP32</h1>
     <div class="actions">
       <button class="btn btn-primary" id="updateBtn">Cập nhật trạng thái ESP</button>
-      <a href="/data/clear" class="btn btn-danger" onclick="return confirm('Xóa toàn bộ dữ liệu?')">Xóa tất cả</a>
+      <a href="/data/clear" class="btn btn-danger" onclick="return confirm('Xóa toàn bộ dữ liệu?')">
+          Xóa tất cả
+      </a>
     </div>
 
     <table>
