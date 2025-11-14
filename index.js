@@ -4,7 +4,6 @@ const path = require("path");
 const { Mutex } = require("async-mutex");  // npm install async-mutex
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, "data.json");
 const mutex = new Mutex();  // ← Ngăn race condition
 
@@ -389,6 +388,7 @@ app.get("/", (req, res) => {
   `);
 });
 
-app.listen(PORT, () => {
-  console.log(`Server chạy tại http://localhost:${PORT}/data`);
+const port = 3000;
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Server listening on port ${port} (host: 0.0.0.0)`);
 });
