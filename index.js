@@ -62,7 +62,8 @@ app.get("/", (req, res) => {
  * Ví dụ: /log?device=esp32-01&status=online&timestamp=1730640000&uptime=3600&localip=192.168.1.10
  */
 app.post("/log", (req, res) => {
-  const { device, status, timestamp, uptime, localip } = req.query;
+  const body = req.body; 
+  const { device, status, timestamp, uptime, localip } = body;
 
   // Kiểm tra tối thiểu
   if (!device || !status) {
