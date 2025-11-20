@@ -1,27 +1,63 @@
 const express = require("express");
-const fs = require("fs");
+const fsSync = require("fs");
+const fsp = require("fs").promises;
 const path = require("path");
-const { Mutex } = require("async-mutex");  // npm install async-mutex
+const { Mutex } = require("async-mutex");
 
 const app = express();
 const DATA_FILE = path.join(__dirname, "data.json");
+const TMP_FILE = DATA_FILE + ".tmp";
 const mutex = new Mutex();  // ← Ngăn race condition
+const MAX_PENDING = 1000;
 
-// Tạo file
-if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, "[]", "utf8");
+function sanitizeDeviceKey(v) {
+  if (!v) return null;
+  if (typeof v !== 'string') v = String(v);
+  v = v.trim();
+  if (v.length === 0 || v.length > 64) return null;
+  if (!/^[A-Za-z0-9_\-]+$/.test(v)) return null;
+  return v;
+}
 
-function readData() {
-  try { return JSON.parse(fs.readFileSync(DATA_FILE, "utf8") || "[]"); }
-  catch (err) { console.error("Read error:", err); return []; }
+function escapeHtml(s) {
+  if (s === null || s === undefined) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Ensure data file exists and cleanup tmp on startup
+try {
+  if (!fsSync.existsSync(DATA_FILE)) fsSync.writeFileSync(DATA_FILE, "[]", "utf8");
+} catch (e) {}
+try {
+  if (fsSync.existsSync(TMP_FILE)) fsSync.unlinkSync(TMP_FILE);
+} catch (e) {}
+
+// Async read/write (non-blocking)
+async function readData() {
+  try {
+    const s = await fsp.readFile(DATA_FILE, "utf8");
+    return JSON.parse(s || "[]");
+  } catch (e) {
+    return [];
+  }
 }
 
 async function writeData(arr) {
-  const release = await mutex.acquire();
+  const release = await mutex.acquire(); // <-- use correct mutex variable
   try {
-    const tmp = DATA_FILE + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(arr, null, 2));
-    fs.renameSync(tmp, DATA_FILE);
-  } finally { release(); }
+    await fsp.writeFile(TMP_FILE, JSON.stringify(arr, null, 2), "utf8");
+    await fsp.rename(TMP_FILE, DATA_FILE);
+  } catch (err) {
+    try { if (fsSync.existsSync(TMP_FILE)) fsSync.unlinkSync(TMP_FILE); } catch (_) {}
+    throw err;
+  } finally {
+    release();
+  }
 }
 
 app.use(express.json({ limit: "1mb" }));
@@ -34,57 +70,88 @@ const pendingRequests = new Map();  // device_key → res
 const clientTimeouts = new Map();   // device_key → timeout ID
 
 app.get("/wait", (req, res) => {
-  const device_key = req.query.device_key;
-  if (!device_key) return res.status(400).json({ error: "Thiếu device_key" });
+  const device_key = sanitizeDeviceKey(req.query.device_key);
+  if (!device_key) return res.status(400).json({ error: "Thiếu hoặc device_key không hợp lệ" });
 
-  // Xóa cũ nếu có
-  if (pendingRequests.has(device_key)) {
-    const oldRes = pendingRequests.get(device_key);
-    if (oldRes.headersSent === false) oldRes.json({ cmd: "none" });
-    clearTimeout(clientTimeouts.get(device_key));
+  if (pendingRequests.size >= MAX_PENDING) {
+    return res.status(503).json({ error: "Server busy, try later" });
   }
 
+  // Nếu đã có pending cũ, trả none và cleanup
+  if (pendingRequests.has(device_key)) {
+    const oldRes = pendingRequests.get(device_key);
+    try {
+      if (!oldRes.headersSent) oldRes.json({ cmd: "none" });
+    } catch (e) { /* ignore */ }
+    pendingRequests.delete(device_key);
+    const t = clientTimeouts.get(device_key);
+    if (t) { clearTimeout(t); clientTimeouts.delete(device_key); }
+  }
+
+  // store new pending response
   pendingRequests.set(device_key, res);
   const timeout = setTimeout(() => {
-    if (pendingRequests.get(device_key) === res) {
-      res.json({ cmd: "none" });
+    const r = pendingRequests.get(device_key);
+    if (r === res) {
+      try { if (!res.headersSent) res.json({ cmd: "none" }); } catch (e) {}
       pendingRequests.delete(device_key);
     }
+    const t2 = clientTimeouts.get(device_key);
+    if (t2) { clearTimeout(t2); clientTimeouts.delete(device_key); }
   }, 60000);
   clientTimeouts.set(device_key, timeout);
 
+  // ensure response won't hang forever (extra guard)
+  res.setTimeout(61000, () => {
+    try { if (!res.headersSent) res.json({ cmd: "none" }); } catch (e) {}
+    if (pendingRequests.get(device_key) === res) pendingRequests.delete(device_key);
+    const t = clientTimeouts.get(device_key);
+    if (t) { clearTimeout(t); clientTimeouts.delete(device_key); }
+  });
+
   req.on("close", () => {
-    if (pendingRequests.get(device_key) === res) {
-      pendingRequests.delete(device_key);
-      clearTimeout(clientTimeouts.get(device_key));
-      clientTimeouts.delete(device_key);
-    }
+    const r = pendingRequests.get(device_key);
+    if (r === res) pendingRequests.delete(device_key);
+    const t = clientTimeouts.get(device_key);
+    if (t) { clearTimeout(t); clientTimeouts.delete(device_key); }
   });
 });
 
 app.post("/trigger", (req, res) => {
-  const device_key = req.query.device_key;
-  if (!device_key) return res.status(400).send("Thiếu device_key");
+  // Accept device_key in query or body
+  const rawKey = req.query.device_key || (req.body && req.body.device_key);
+  const device_key = sanitizeDeviceKey(rawKey);
+  if (!device_key) return res.status(400).send("Thiếu hoặc device_key không hợp lệ");
 
+  // Atomically take client and remove from maps
   const client = pendingRequests.get(device_key);
-  if (client && !client.headersSent) {
-    client.json({ cmd: "send" });
+  const timeoutId = clientTimeouts.get(device_key);
+
+  if (client) {
+    // remove entries first to avoid race
     pendingRequests.delete(device_key);
-    clearTimeout(clientTimeouts.get(device_key));
-    clientTimeouts.delete(device_key);
-    res.send(`Đã gửi lệnh đến ${device_key}`);
+    if (timeoutId) { clearTimeout(timeoutId); clientTimeouts.delete(device_key); }
+
+    try {
+      if (!client.headersSent) client.json({ cmd: "send" });
+      return res.send(`Đã gửi lệnh đến ${device_key}`);
+    } catch (e) {
+      // nếu gửi thất bại, trả lỗi cho caller
+      return res.status(500).send("Lỗi khi gửi lệnh tới client");
+    }
   } else {
-    res.send(`Thiết bị không online: ${device_key}`);
+    return res.send(`Thiết bị không online: ${device_key}`);
   }
 });
 
 // Log
 app.post("/log", async (req, res) => {
   const { device_key, device, status, timestamp, uptime, localip, resent } = req.body;
-  if (!device_key || !device || !status) return res.status(400).json({ ok: false });
+  const sk = sanitizeDeviceKey(device_key);
+  if (!sk || !device || !status) return res.status(400).json({ ok: false });
 
   const record = {
-    device_key: String(device_key),
+    device_key: sk,
     device: String(device),
     status: String(status),
     timestamp: timestamp || new Date().toISOString(),
@@ -95,7 +162,7 @@ app.post("/log", async (req, res) => {
   };
 
   try {
-    const data = readData();
+    const data = await readData(); // <-- awaited
     data.push(record);
     await writeData(data);
     res.json({ ok: true, saved: record, total: data.length });
@@ -108,61 +175,78 @@ app.post("/log", async (req, res) => {
 const latestStatus = new Map();
 app.post("/status", (req, res) => {
   const { device_key, device, status, timestamp, uptime, localip } = req.body;
-  if (!device_key || !device || !status) return res.status(400).json({ ok: false });
+  const sk = sanitizeDeviceKey(device_key);
+  if (!sk || !device || !status) return res.status(400).json({ ok: false });
 
-  const result = { device_key, device, status, timestamp: timestamp || new Date().toISOString(), uptime, localip, receivedAt: new Date().toISOString() };
-  latestStatus.set(device_key, result);
-  setTimeout(() => latestStatus.delete(device_key), 30000);
+
+  const result = { device_key: sk, device, status, timestamp: timestamp || new Date().toISOString(), uptime, localip, receivedAt: new Date().toISOString() };
+  latestStatus.set(sk, result);
+  setTimeout(() => latestStatus.delete(sk), 30000);
   res.json({ ok: true, data: result });
 });
 
 app.get("/status/latest", (req, res) => {
-  const data = latestStatus.get(req.query.device_key);
+  const key = sanitizeDeviceKey(req.query.device_key);
+  if (!key) return res.json({ ok: false });
+  const data = latestStatus.get(key);
   res.json(data ? { ok: true, data } : { ok: false });
 });
 
-// UI với pagination
-// ==== UI: TRANG CHÍNH + BẢNG + POPUP + PAGINATION ====
+// Route: hiển thị data với pagination
 app.get("/data", async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = 50;
-  const data = readData().reverse(); // Mới nhất lên đầu
+
+  // clone rồi reverse để không thay đổi mảng gốc
+  const raw = await readData() || [];
+  const data = raw.slice().reverse();
+
   const total = data.length;
-  const pages = Math.ceil(total / limit);
-  const start = (page - 1) * limit;
+  const pages = Math.max(1, Math.ceil(total / limit)); // đảm bảo >=1
+  const curPage = Math.min(page, pages);
+  const start = (curPage - 1) * limit;
   const end = Math.min(start + limit, total);
 
-  const rows = data
-    .slice(start, end)
-    .map((r, i) => `
+  // nếu không có dữ liệu, rows sẽ là chuỗi rỗng
+  const rows = (total === 0)
+    ? ""
+    : data.slice(start, end).map((r, i) => {
+      const idx = total - start - i;
+      return `
       <tr>
-        <td>${total - start - i}</td>
-        <td><strong>${r.device_key}</strong></td>
-        <td>${r.device}</td>
-        <td>${r.status}</td>
-        <td>${r.timestamp}</td>
-        <td>${r.uptime || ""}</td>
-        <td>${r.localip || ""}</td>
-        <td>${new Date(r.createdAt).toLocaleString("vi-VN")}</td>
-      </tr>`)
-    .join("");
+        <td data-label="#">${idx}</td>
+        <td data-label="DEVICE_KEY"><strong>${escapeHtml(r.device_key)}</strong></td>
+        <td data-label="Thiết bị">${escapeHtml(r.device)}</td>
+        <td data-label="Trạng thái">${escapeHtml(r.status)}</td>
+        <td data-label="Thời gian">${escapeHtml(r.timestamp)}</td>
+        <td data-label="Uptime">${escapeHtml(r.uptime || "")}</td>
+        <td data-label="IP">${escapeHtml(r.localip || "")}</td>
+        <td data-label="Nhận lúc">${escapeHtml(new Date(r.createdAt).toLocaleString("vi-VN"))}</td>
+      </tr>`;
+    }).join("");
 
-  const deviceKeys = [...new Set(data.map(r => r.device_key).filter(Boolean))].sort();
+  // build danh sách device keys cho select (escape)
+  const deviceKeys = [...new Set(data.map(r => r.device_key).filter(Boolean))]
+    .sort()
+    .map(k => escapeHtml(k));
 
-  // Pagination HTML
+  // Pagination HTML: tính hiển thị range an toàn
+  const displayFrom = total === 0 ? 0 : (start + 1);
+  const displayTo = total === 0 ? 0 : end;
+
   const pagination = `
     <div style="margin:20px 0;text-align:center;font-size:1.1rem;">
-      ${page > 1 ? `<a href="/data?page=${page-1}" class="btn">Trước</a>` : '<span class="btn disabled">Trước</span>'}
-      <span style="margin:0 15px;">Trang <strong>${page}</strong> / <strong>${pages}</strong></span>
-      ${page < pages ? `<a href="/data?page=${page+1}" class="btn">Sau</a>` : '<span class="btn disabled">Sau</span>'}
+      ${curPage > 1 ? `<a href="/data?page=${curPage-1}" class="btn">Trước</a>` : '<span class="btn disabled">Trước</span>'}
+      <span style="margin:0 15px;">Trang <strong>${curPage}</strong> / <strong>${pages}</strong></span>
+      ${curPage < pages ? `<a href="/data?page=${curPage+1}" class="btn">Sau</a>` : '<span class="btn disabled">Sau</span>'}
       <div style="margin-top:8px;font-size:0.9rem;color:#666;">
-        Hiển thị ${start + 1}–${end} trong tổng số <strong>${total}</strong> bản ghi
+        Hiển thị ${displayFrom}–${displayTo} trong tổng số <strong>${total}</strong> bản ghi
       </div>
     </div>
   `;
 
-  const html = `
-<!DOCTYPE html>
+  // HTML chính: chèn rows và deviceKeys (mình giữ style & js của bạn)
+  const html = `<!DOCTYPE html>
 <html lang="vi">
 <head>
   <meta charset="UTF-8" />
@@ -255,7 +339,7 @@ app.get("/data", async (req, res) => {
     ${pagination}
   </div>
 
-  <!-- Popup -->
+   <!-- Popup -->
   <div class="modal" id="modal">
     <div class="modal-content">
       <div class="modal-header">
@@ -328,11 +412,22 @@ app.get("/data", async (req, res) => {
   </script>
 </body>
 </html>
-  `;
+`;
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(html);
 });
+
+// Clear data (async)
+app.get("/data/clear", async (req, res) => {
+  try {
+    await writeData([]);
+    res.redirect("/data");
+  } catch (e) {
+    res.status(500).send("Xóa dữ liệu thất bại");
+  }
+});
+
 
 
 // Endpoint: Trang chủ - Hello World
