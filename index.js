@@ -77,12 +77,21 @@ app.get("/wait", (req, res) => {
     return res.status(503).json({ error: "Server busy, try later" });
   }
 
-  // Nếu đã có pending cũ, trả none và cleanup
+  // helper cleanup (idempotent)
+  const cleanup = () => {
+    const cur = pendingRequests.get(device_key);
+    if (cur === res) pendingRequests.delete(device_key);
+    const t = clientTimeouts.get(device_key);
+    if (t) {
+      clearTimeout(t);
+      clientTimeouts.delete(device_key);
+    }
+  };
+
+  // If old pending exists, reply none and cleanup
   if (pendingRequests.has(device_key)) {
     const oldRes = pendingRequests.get(device_key);
-    try {
-      if (!oldRes.headersSent) oldRes.json({ cmd: "none" });
-    } catch (e) { /* ignore */ }
+    try { if (!oldRes.headersSent) oldRes.json({ cmd: "none" }); } catch (e) {}
     pendingRequests.delete(device_key);
     const t = clientTimeouts.get(device_key);
     if (t) { clearTimeout(t); clientTimeouts.delete(device_key); }
@@ -90,30 +99,26 @@ app.get("/wait", (req, res) => {
 
   // store new pending response
   pendingRequests.set(device_key, res);
-  const timeout = setTimeout(() => {
+
+  const timeoutId = setTimeout(() => {
+    // only reply the same res
     const r = pendingRequests.get(device_key);
     if (r === res) {
       try { if (!res.headersSent) res.json({ cmd: "none" }); } catch (e) {}
-      pendingRequests.delete(device_key);
+      cleanup();
     }
-    const t2 = clientTimeouts.get(device_key);
-    if (t2) { clearTimeout(t2); clientTimeouts.delete(device_key); }
   }, 60000);
-  clientTimeouts.set(device_key, timeout);
+  clientTimeouts.set(device_key, timeoutId);
 
-  // ensure response won't hang forever (extra guard)
+  // ensure response won't hang forever (extra guard) - keep consistent cleanup
   res.setTimeout(61000, () => {
     try { if (!res.headersSent) res.json({ cmd: "none" }); } catch (e) {}
-    if (pendingRequests.get(device_key) === res) pendingRequests.delete(device_key);
-    const t = clientTimeouts.get(device_key);
-    if (t) { clearTimeout(t); clientTimeouts.delete(device_key); }
+    cleanup();
   });
 
+  // client closed connection
   req.on("close", () => {
-    const r = pendingRequests.get(device_key);
-    if (r === res) pendingRequests.delete(device_key);
-    const t = clientTimeouts.get(device_key);
-    if (t) { clearTimeout(t); clientTimeouts.delete(device_key); }
+    cleanup();
   });
 });
 
@@ -479,6 +484,25 @@ app.get("/", (req, res) => {
 </html>
   `);
 });
+
+function gracefulExit(code = 0) {
+  try {
+    pendingRequests.forEach((r, k) => {
+      try { if (!r.headersSent) r.json({ cmd: "none" }); } catch (e) {}
+    });
+    pendingRequests.clear();
+
+    clientTimeouts.forEach(t => clearTimeout(t));
+    clientTimeouts.clear();
+
+    // cleanup tmp file if exists
+    try { if (fsSync.existsSync(TMP_FILE)) fsSync.unlinkSync(TMP_FILE); } catch (e) {}
+  } finally {
+    process.exit(code);
+  }
+}
+process.on('SIGINT', () => gracefulExit(0));
+process.on('SIGTERM', () => gracefulExit(0));
 
 const port = 3000;
 app.listen(port, '0.0.0.0', () => {
